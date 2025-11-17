@@ -1,7 +1,7 @@
 # data
 data:
-  train_data: "/home/enpei/EnPei/Game-Time-Sushi/moshi-finetune/data/gametime_train.jsonl"
-  eval_data: "/home/enpei/EnPei/Game-Time-Sushi/moshi-finetune/data/gametime_test.jsonl"
+  train_data: "./data/gametime_train.jsonl"
+  eval_data: "./data/gametime_test.jsonl"
   shuffle: true
 
 # model
@@ -20,7 +20,7 @@ text_padding_weight: 0.5
 
 # optim
 duration_sec: 100
-batch_size: 12          # fits TITAN RTX (~40 GB w/ stereo Mimi) with headroom
+batch_size: 16        
 max_steps: 2500         # ≈1.8 epochs over 16.9k clips
 gradient_checkpointing: true
 optim:
@@ -31,17 +31,17 @@ optim:
 # other
 seed: 0
 log_freq: 10
-eval_freq: 100
+eval_freq: 250
 do_eval: true
 do_ckpt: true
 ckpt_freq: 250
 
-num_microbatches: 1
-max_norm: 1.0
-param_dtype: bfloat16
+# num_microbatches: 1
+# max_norm: 1.0
+# param_dtype: bfloat16
 
 save_adapters: true
-run_dir: "/home/enpei/EnPei/Game-Time-Sushi/saves/moshi/gametime_lora"
+run_dir: "../saves/moshi/gametime_lora"
 
 wandb:
   project: "moshi-gametime"
