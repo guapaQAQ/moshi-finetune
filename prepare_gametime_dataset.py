@@ -95,6 +95,13 @@ def iter_jsonl_files(alignment_root: Path, split_name: str) -> Iterable[Path]:
             continue
         yield from sorted(candidate.glob("*.jsonl"))
 
+def iter_wav_files(dialogue_root: Path, split_name: str) -> Iterable[Path]:
+    for scenario_dir in sorted(dialogue_root.iterdir()):
+        candidate = scenario_dir / split_name
+        if not candidate.is_dir():
+            continue
+        yield from sorted(candidate.glob("*.wav"))
+
 
 def find_alignment_root(dataset_dir: Path) -> Path:
     for candidate in ("alignment", "alignments", "alignments_whisper"):
@@ -112,20 +119,13 @@ def convert_dataset(dataset_dir: Path, split_name: str) -> list[dict]:
     dialogue_root = dataset_dir / "dialogue"
     if not dialogue_root.is_dir():
         raise FileNotFoundError(f"{dataset_dir} must contain a 'dialogue/' folder.")
-    alignment_root = find_alignment_root(dataset_dir)
+    # alignment_root = find_alignment_root(dataset_dir)
 
     records: list[dict] = []
-    for jsonl_path in iter_jsonl_files(alignment_root, split_name):
-        rel = jsonl_path.relative_to(alignment_root)
+    for audio_path in iter_wav_files(dialogue_root, split_name):
+        rel = audio_path.relative_to(dialogue_root)
         scenario = rel.parts[0]
-        filename = jsonl_path.stem
-        audio_path = dialogue_root / scenario / split_name / f"{filename}.wav"
-        if not audio_path.exists():
-            raise FileNotFoundError(f"Missing audio file for {jsonl_path}: {audio_path}")
-
-        alignments = load_alignment_entries(jsonl_path)
-        json_path = audio_path.with_suffix(".json")
-        write_alignment_json(json_path, alignments)
+        filename = audio_path.stem
 
         duration = get_duration(audio_path)
         records.append(
