@@ -1,0 +1,50 @@
+# data
+data:
+  train_data: "/home/enpei/EnPei/Game-Time-Sushi/moshi-finetune/data/gametime_train.jsonl"
+  eval_data: "/home/enpei/EnPei/Game-Time-Sushi/moshi-finetune/data/gametime_test.jsonl"
+  shuffle: true
+
+# model
+moshi_paths:
+  hf_repo_id: "kyutai/moshiko-pytorch-bf16"
+
+full_finetuning: false  # keep LoRA for 24 GB TITAN RTX
+lora:
+  enable: true
+  rank: 128
+  scaling: 2.0
+  ft_embed: false
+
+first_codebook_weight_multiplier: 100.0
+text_padding_weight: 0.5
+
+# optim
+duration_sec: 100
+batch_size: 12          # fits TITAN RTX (~40 GB w/ stereo Mimi) with headroom
+max_steps: 2500         # ≈1.8 epochs over 16.9k clips
+gradient_checkpointing: true
+optim:
+  lr: 2.0e-6
+  weight_decay: 0.1
+  pct_start: 0.05
+
+# other
+seed: 0
+log_freq: 10
+eval_freq: 100
+do_eval: true
+do_ckpt: true
+ckpt_freq: 250
+
+num_microbatches: 1
+max_norm: 1.0
+param_dtype: bfloat16
+
+save_adapters: true
+run_dir: "/home/enpei/EnPei/Game-Time-Sushi/saves/moshi/gametime_lora"
+
+wandb:
+  project: "moshi-gametime"
+  run_name: "moshi_7B_gametime_lora"
+  key: "${WANDB_API_KEY}"   # export WANDB_API_KEY in your shell before launching
+  offline: false
