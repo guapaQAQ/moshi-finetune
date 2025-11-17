@@ -119,11 +119,20 @@ def convert_dataset(dataset_dir: Path, split_name: str) -> list[dict]:
     dialogue_root = dataset_dir / "dialogue"
     if not dialogue_root.is_dir():
         raise FileNotFoundError(f"{dataset_dir} must contain a 'dialogue/' folder.")
-    # alignment_root = find_alignment_root(dataset_dir)
+    alignment_root = find_alignment_root(dataset_dir)
 
     records: list[dict] = []
     for audio_path in iter_wav_files(dialogue_root, split_name):
         rel = audio_path.relative_to(dialogue_root)
+        alignment_path = (
+            alignment_root / rel.parent / f"{audio_path.stem}.jsonl"
+        )
+
+        # copy alignment to dialogue folder with Moshi format
+        alignments = load_alignment_entries(alignment_path)
+        output_alignment_path = audio_path.with_suffix(".json")
+        write_alignment_json(output_alignment_path, alignments)
+
         scenario = rel.parts[0]
         filename = audio_path.stem
 
