@@ -164,6 +164,8 @@ def main():
             manifest_split, split_name = determine_split(dataset_dir)
         except ValueError:
             continue
+        if split_name not in ("train"):
+            continue
         records = convert_dataset(dataset_dir, split_name)
         manifests[manifest_split].extend(records)
 
