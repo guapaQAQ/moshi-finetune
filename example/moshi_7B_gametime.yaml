@@ -46,5 +46,4 @@ run_dir: "../saves/moshi/gametime_lora"
 wandb:
   project: "moshi-gametime"
   run_name: "moshi_7B_gametime_lora"
-  key: "${WANDB_API_KEY}"   # export WANDB_API_KEY in your shell before launching
-  offline: false
+  key: "131f192f269eca7a738b239324dee215e74d2bb5"  
