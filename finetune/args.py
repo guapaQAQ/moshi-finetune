@@ -84,6 +84,9 @@ class TrainArgs(Serializable):
     max_steps: int = 100  # Number of training steps.
     log_freq: int = 1  # Number of steps between each logging.
 
+    # Optional path to a saved LoRA adapter to warm start training.
+    lora_weight: str | None = None
+
     # Number of steps between each checkpoint saving. If inferior to 1, only the last checkpoint will be saved.
     ckpt_freq: int = 0
     save_adapters: bool = True

@@ -4,13 +4,18 @@ data:
   eval_data: "/home/dmnph/Game-Time-Sushi/moshi-finetune/data/gametime_test_advanced.jsonl"
   shuffle: true
 
-# model (continue from basic LoRA checkpoint)
+# model (load base from HF and warm start LoRA from previous run)
 moshi_paths:
-  hf_repo_id: null
-  config_path: "/home/dmnph/Game-Time-Sushi/saves/moshi/gametime_basic_lora/checkpoints/checkpoint_002500/consolidated/config.json"
-  moshi_path: "/home/dmnph/Game-Time-Sushi/saves/moshi/gametime_basic_lora/checkpoints/checkpoint_002500/consolidated/lora.safetensors"
+  hf_repo_id: "kyutai/moshiko-pytorch-bf16"
+  config_path: null
+  moshi_path: null
+  mimi_path: null
+  tokenizer_path: null
 
-full_finetuning: false  
+# Optional warm-start adapter
+lora_weight: "/home/dmnph/Game-Time-Sushi/saves/moshi/gametime_basic_lora/checkpoints/checkpoint_002500/consolidated/lora.safetensors"
+
+full_finetuning: false  # keep LoRA for 24 GB TITAN RTX
 lora:
   enable: true
   rank: 128

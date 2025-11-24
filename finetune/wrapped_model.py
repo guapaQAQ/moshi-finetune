@@ -149,6 +149,18 @@ def get_fsdp_model(
             # initialize LoRA layers
             initialize_lora_parameters(model, param_dtype)
 
+        lora_weight = getattr(args, "lora_weight", None)
+        if lora_weight:
+            main_logger_info(f"Loading LoRA weights from {lora_weight} ...")
+            lora_state = safetensors.torch.load_file(lora_weight)
+            missing, unexpected = model.load_state_dict(
+                lora_state, strict=False, assign=True
+            )
+            if missing:
+                main_logger_info(f"Missing keys when loading LoRA: {missing}")
+            if unexpected:
+                main_logger_info(f"Unexpected keys when loading LoRA: {unexpected}")
+
         assert not any(p.is_meta for p in model.parameters()), (
             "All parameters should be initialized by now"
         )
