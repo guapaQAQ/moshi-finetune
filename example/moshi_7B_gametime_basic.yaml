@@ -1,6 +1,6 @@
 # data
 data:
-  train_data: "/home/dmnph/Game-Time-Sushi/gametime_train.jsonl"
+  train_data: "/home/dmnph/Game-Time-Sushi/gametime_train_basic.jsonl"
   eval_data: "" #/home/dmnph/Game-Time-Sushi/gametime_test.jsonl"
   shuffle: true
 
@@ -41,9 +41,9 @@ ckpt_freq: 250
 # param_dtype: bfloat16
 
 save_adapters: true
-run_dir: "../saves/moshi/gametime_lora"
+run_dir: "../saves/moshi/gametime_basic_lora"
 
 wandb:
   project: "moshi-gametime"
-  run_name: "moshi_7B_gametime_lora"
+  run_name: "moshi_7B_gametime_basic_lora"
   key: "131f192f269eca7a738b239324dee215e74d2bb5"  
