@@ -298,9 +298,19 @@ def main():
 
     manifests: dict[str, list[dict]] = defaultdict(list)
 
-    for dataset_dir in sorted(args.datasets_root.iterdir()):
-        if not dataset_dir.is_dir():
-            continue
+    # Allow pointing directly at a dataset folder or at a root containing multiple datasets.
+    candidate_dirs: list[Path] = []
+    if (args.datasets_root / "dialogue").is_dir():
+        candidate_dirs.append(args.datasets_root)
+    else:
+        candidate_dirs.extend([p for p in args.datasets_root.iterdir() if p.is_dir()])
+
+    if not candidate_dirs:
+        raise FileNotFoundError(
+            f"No dataset folders found under {args.datasets_root} (expected 'dialogue/' subfolder)."
+        )
+
+    for dataset_dir in sorted(candidate_dirs):
         try:
             manifest_split, split_name = determine_split(dataset_dir)
         except ValueError:
