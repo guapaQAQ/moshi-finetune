@@ -153,13 +153,33 @@ def get_fsdp_model(
         if lora_weight:
             main_logger_info(f"Loading LoRA weights from {lora_weight} ...")
             lora_state = safetensors.torch.load_file(lora_weight)
-            missing, unexpected = model.load_state_dict(
-                lora_state, strict=False, assign=True
+
+            model_state = model.state_dict()
+            missing_shapes: list[str] = []
+            unexpected_keys: list[str] = []
+            loaded = 0
+
+            with torch.no_grad():
+                for key, tensor in lora_state.items():
+                    if key not in model_state:
+                        unexpected_keys.append(key)
+                        continue
+
+                    target = model_state[key]
+                    if target.shape != tensor.shape:
+                        missing_shapes.append(key)
+                        continue
+
+                    target.copy_(tensor.to(dtype=target.dtype, device=target.device))
+                    loaded += 1
+
+            main_logger_info(
+                f"Loaded {loaded} LoRA tensors ({len(unexpected_keys)} unexpected, {len(missing_shapes)} shape mismatches)"
             )
-            if missing:
-                main_logger_info(f"Missing keys when loading LoRA: {missing}")
-            if unexpected:
-                main_logger_info(f"Unexpected keys when loading LoRA: {unexpected}")
+            if unexpected_keys:
+                main_logger_info(f"Unexpected keys when loading LoRA: {unexpected_keys}")
+            if missing_shapes:
+                main_logger_info(f"Shape mismatches when loading LoRA: {missing_shapes}")
 
         assert not any(p.is_meta for p in model.parameters()), (
             "All parameters should be initialized by now"
