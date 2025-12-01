@@ -179,13 +179,13 @@ def score_priority(scores: dict) -> tuple[float, float]:
 
     Instruction following is up-weighted (1.5x) relative to other scores.
     """
-    values = list(scores.values())
+    values = [float(v) for v in scores.values() if v is not None]
     if not values:
         return (-1.0, -1.0)
-    instr = scores.get("instruction_following", 0.0)
-    weighted = 1.5 * instr + sum(
-        v for k, v in scores.items() if k != "instruction_following"
-    )
+    instr_raw = scores.get("instruction_following")
+    instr = float(instr_raw) if instr_raw is not None else 0.0
+    other_vals = [float(v) for k, v in scores.items() if k != "instruction_following" and v is not None]
+    weighted = 1.5 * instr + sum(other_vals)
     avg = sum(values) / len(values)
     return (weighted, avg)
 
