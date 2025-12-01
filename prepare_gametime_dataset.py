@@ -246,7 +246,7 @@ def convert_dataset(
         duration = get_duration(audio_path)
         records.append(
             {
-                "path": str(audio_path),
+                "path": str(audio_path.resolve()),
                 "duration": duration,
                 "scenario": scenario,
                 "dataset": dataset_dir.name,
@@ -270,7 +270,7 @@ def convert_dataset(
             duration = get_duration(audio_path)
             records.append(
                 {
-                    "path": str(audio_path),
+                    "path": str(audio_path.resolve()),
                     "duration": duration,
                     "scenario": scenario,
                     "dataset": dataset_dir.name,
@@ -289,6 +289,10 @@ def convert_dataset(
 
 def main():
     args = parse_args()
+    args.datasets_root = args.datasets_root.resolve()
+    args.output_dir = args.output_dir.resolve()
+    if args.score_root is not None:
+        args.score_root = args.score_root.resolve()
     if not args.datasets_root.is_dir():
         raise FileNotFoundError(f"datasets_root {args.datasets_root} does not exist.")
     if args.top_per_id and args.score_root is None:
