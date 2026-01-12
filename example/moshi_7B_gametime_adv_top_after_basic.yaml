@@ -1,6 +1,6 @@
 # data
 data:
-  train_data: "/home/dmnph/Game-Time-Sushi/moshi-finetune/data/gametime_train_all_advanced.jsonl"
+  train_data: "/home/dmnph/Game-Time-Sushi/moshi-finetune/data/gametime_train_advanced.jsonl"
   eval_data: "/home/dmnph/Game-Time-Sushi/moshi-finetune/data/gametime_test_advanced.jsonl"
   shuffle: true
 
@@ -49,9 +49,9 @@ ckpt_freq: 250
 # num_ckpt_keep: 3
 
 save_adapters: true
-run_dir: "../saves/moshi/gametime_adv_after_basic_lora"
+run_dir: "../saves/moshi/gametime_adv_top_after_basic_lora"
 
 wandb:
   project: "moshi-gametime"
-  run_name: "moshi_7B_gametime_adv_after_basic_lora"
+  run_name: "moshi_7B_gametime_adv_top_after_basic_lora"
   key: "131f192f269eca7a738b239324dee215e74d2bb5"  
