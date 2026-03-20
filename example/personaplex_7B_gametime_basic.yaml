@@ -29,7 +29,7 @@ text_padding_weight: 0.3
 duration_sec: 100
 batch_size: 8
 max_steps: 2500
-gradient_checkpointing: true
+gradient_checkpointing: false
 optim:
   lr: 2.0e-6
   weight_decay: 0.1
