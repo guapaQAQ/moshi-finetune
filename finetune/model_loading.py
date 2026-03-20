@@ -174,8 +174,6 @@ class CompatCheckpointInfo:
         load_weight: bool = True,
     ) -> LMModel:
         lm_kwargs = get_lm_config(self)
-        if lm_kwargs_overrides:
-            lm_kwargs.update(lm_kwargs_overrides)
 
         sig = inspect.signature(LMModel)
         accepted = set(sig.parameters.keys())
@@ -183,6 +181,22 @@ class CompatCheckpointInfo:
             p.kind == inspect.Parameter.VAR_KEYWORD
             for p in sig.parameters.values()
         )
+        if lm_kwargs_overrides:
+            unsupported: list[str] = []
+            safe_overrides: dict[str, Any] = {}
+            for key, value in lm_kwargs_overrides.items():
+                if key in lm_kwargs or key in accepted:
+                    safe_overrides[key] = value
+                else:
+                    unsupported.append(key)
+            if unsupported:
+                raise RuntimeError(
+                    "The installed `moshi` package does not support the requested "
+                    f"LM settings: {', '.join(sorted(unsupported))}. "
+                    "Either use a compatible `moshi` version or remove those "
+                    "settings from the training path."
+                )
+            lm_kwargs.update(safe_overrides)
         if accepts_var_kwargs:
             ctor_kwargs = dict(lm_kwargs)
         else:
