@@ -179,7 +179,14 @@ class CompatCheckpointInfo:
 
         sig = inspect.signature(LMModel)
         accepted = set(sig.parameters.keys())
-        ctor_kwargs = {k: v for k, v in lm_kwargs.items() if k in accepted}
+        accepts_var_kwargs = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD
+            for p in sig.parameters.values()
+        )
+        if accepts_var_kwargs:
+            ctor_kwargs = dict(lm_kwargs)
+        else:
+            ctor_kwargs = {k: v for k, v in lm_kwargs.items() if k in accepted}
         if "device" in accepted:
             ctor_kwargs["device"] = device
         if "dtype" in accepted:
