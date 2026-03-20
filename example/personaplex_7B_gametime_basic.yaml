@@ -1,0 +1,54 @@
+# GameTime -> PersonaPlex LoRA fine-tune.
+#
+# This uses the existing moshi-finetune trainer but starts from the
+# NVIDIA PersonaPlex checkpoint instead of the base Kyutai Moshi weights.
+# It assumes a fixed-persona setup: no per-example text prompt and no
+# voice-prompt prefix is injected during training.
+
+# data
+data:
+  train_data: "data/gametime_train_all_basic.jsonl"
+  eval_data: "data/gametime_test_basic.jsonl"
+  shuffle: true
+
+# model
+moshi_paths:
+  hf_repo_id: "nvidia/personaplex-7b-v1"
+
+full_finetuning: false
+lora:
+  enable: true
+  rank: 128
+  scaling: 2.0
+  ft_embed: false
+
+first_codebook_weight_multiplier: 100.0
+text_padding_weight: 0.3
+
+# optim
+duration_sec: 100
+batch_size: 8
+max_steps: 2500
+gradient_checkpointing: true
+optim:
+  lr: 2.0e-6
+  weight_decay: 0.1
+  pct_start: 0.05
+
+# other
+seed: 0
+log_freq: 10
+eval_freq: 250
+do_eval: true
+do_ckpt: true
+ckpt_freq: 250
+
+save_adapters: true
+run_dir: "../saves/personaplex/gametime_basic_lora"
+
+# Optional.
+# wandb:
+#   project: "personaplex-gametime"
+#   run_name: "personaplex_7B_gametime_basic_lora"
+#   key: null
+#   offline: false
