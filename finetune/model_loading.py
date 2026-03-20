@@ -20,6 +20,38 @@ MIMI_NAME = getattr(
 )
 DEFAULT_REPO = getattr(loaders, "DEFAULT_REPO", "kyutai/moshiko-pytorch-bf16")
 
+PERSONAPLEX_COMPAT_LM_KWARGS = {
+    "dim": 4096,
+    "text_card": 32000,
+    "existing_text_padding_id": 3,
+    "n_q": 16,
+    "dep_q": 16,
+    "card": 2048,
+    "num_heads": 32,
+    "num_layers": 32,
+    "hidden_scale": 4.125,
+    "causal": True,
+    "layer_scale": None,
+    "context": 3000,
+    "max_period": 10000,
+    "gating": "silu",
+    "norm": "rms_norm_f32",
+    "positional_embedding": "rope",
+    "depformer_dim": 1024,
+    "depformer_dim_feedforward": int(4.125 * 1024),
+    "depformer_num_heads": 16,
+    "depformer_num_layers": 6,
+    "depformer_causal": True,
+    "depformer_layer_scale": None,
+    "depformer_multi_linear": True,
+    "depformer_context": 8,
+    "depformer_max_period": 10000,
+    "depformer_gating": "silu",
+    "depformer_pos_emb": "none",
+    "depformer_weights_per_step": True,
+    "delays": [0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1],
+}
+
 
 def is_safetensors(path: Path | str) -> bool:
     fn = getattr(loaders, "_is_safetensors", None)
@@ -39,6 +71,10 @@ def _load_raw_config(config_path: str | Path | None) -> dict[str, Any] | None:
 
 
 def get_lm_config(checkpoint_info: Any) -> dict[str, Any]:
+    repo = str(getattr(checkpoint_info, "hf_repo", "") or "").lower()
+    if "personaplex" in repo:
+        return copy.deepcopy(PERSONAPLEX_COMPAT_LM_KWARGS)
+
     raw = getattr(checkpoint_info, "raw_config", None)
     if raw is not None:
         return copy.deepcopy(raw)
