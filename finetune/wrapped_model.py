@@ -7,7 +7,6 @@ import safetensors
 import torch
 import torch.distributed.fsdp.wrap as torch_wrap
 from moshi.models.lm import LMModel
-from moshi.models.loaders import CheckpointInfo, _is_safetensors
 from moshi.modules.transformer import StreamingTransformerLayer
 from torch.distributed.fsdp import BackwardPrefetch
 from torch.distributed.fsdp.api import ShardingStrategy
@@ -15,6 +14,7 @@ from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataP
 
 from .args import TrainArgs
 from .distributed import get_rank, get_world_size
+from .model_loading import is_safetensors
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +96,7 @@ def initialize_lora_parameters(model: torch.nn.Module, param_dtype: torch.dtype)
 
 
 def get_fsdp_model(
-    args: TrainArgs, checkpointer_info: CheckpointInfo
+    args: TrainArgs, checkpointer_info
 ) -> FullyShardedDataParallel | LMModel:
     """
     Initializes and returns a FullyShardedDataParallel (FSDP) LMModel or a non sharded LMModel if one GPU available.
@@ -134,7 +134,7 @@ def get_fsdp_model(
     if get_rank() == 0:
         moshi_weight = checkpointer_info.moshi_weights
 
-        assert _is_safetensors(moshi_weight), "Model is not safetensors"
+        assert is_safetensors(moshi_weight), "Model is not safetensors"
         model_state_dict = safetensors.torch.load_file(moshi_weight)
 
         logger.info(f"Converting model to dtype {param_dtype} ...")

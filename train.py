@@ -40,6 +40,7 @@ from finetune.monitoring.metrics_logger import (
     train_log_msg,
 )
 from finetune.monitoring.utils import set_logger
+from finetune.model_loading import build_checkpoint_info, get_lm_config
 from finetune.utils import TrainState, logged_closing, set_random_seed
 from finetune.wrapped_model import get_fsdp_model
 from moshi.models import loaders
@@ -125,7 +126,7 @@ def _train(args: TrainArgs, exit_stack: ExitStack):
 
     # 4.1 Load function calling audio encoder and tokenizer
     main_logger_info("Loading Mimi and Moshi...")
-    checkpoint_info = loaders.CheckpointInfo.from_hf_repo(
+    checkpoint_info = build_checkpoint_info(
         hf_repo=args.moshi_paths.hf_repo_id,
         moshi_weights=args.moshi_paths.moshi_path,
         mimi_weights=args.moshi_paths.mimi_path,
@@ -133,11 +134,7 @@ def _train(args: TrainArgs, exit_stack: ExitStack):
         config_path=args.moshi_paths.config_path,
     )
 
-    lm_config = (
-        loaders._lm_kwargs
-        if checkpoint_info.raw_config is None
-        else checkpoint_info.raw_config
-    )
+    lm_config = get_lm_config(checkpoint_info)
     lm_config["lora"] = args.lora.enable
     lm_config["lora_rank"] = args.lora.rank
     lm_config["lora_scaling"] = args.lora.scaling
