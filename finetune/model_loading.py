@@ -231,6 +231,18 @@ def build_checkpoint_info(
     tokenizer: str | None,
     config_path: str | None,
 ) -> Any:
+    repo_name = (hf_repo or "").lower()
+    if "personaplex" in repo_name:
+        # PersonaPlex config.json may not include fields expected by newer
+        # upstream CheckpointInfo (e.g. dep_q). Use the local compat loader.
+        return CompatCheckpointInfo.from_hf_repo(
+            hf_repo=hf_repo,
+            moshi_weights=moshi_weights,
+            mimi_weights=mimi_weights,
+            tokenizer=tokenizer,
+            config_path=config_path,
+        )
+
     checkpoint_cls = getattr(loaders, "CheckpointInfo", None)
     if checkpoint_cls is not None:
         return checkpoint_cls.from_hf_repo(
