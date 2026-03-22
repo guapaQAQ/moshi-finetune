@@ -22,6 +22,7 @@ dependencies = [
   "whisper_timestamped",
   "huggingface_hub",
   "wandb",
+  "protobuf>=6.31.1,<7",
   "torchaudio",
   "submitit",
   "llvmlite>=0.44",
