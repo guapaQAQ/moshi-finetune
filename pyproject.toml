@@ -21,6 +21,7 @@ dependencies = [
   "auditok==0.2",
   "whisper_timestamped",
   "huggingface_hub",
+  "wandb",
   "torchaudio",
   "submitit",
   "llvmlite>=0.44",
