@@ -41,7 +41,6 @@ PERSONAPLEX_COMPAT_LM_KWARGS = {
     "depformer_dim_feedforward": int(4.125 * 1024),
     "depformer_num_heads": 16,
     "depformer_num_layers": 6,
-    "depformer_causal": True,
     "depformer_layer_scale": None,
     "depformer_multi_linear": True,
     "depformer_context": 8,
