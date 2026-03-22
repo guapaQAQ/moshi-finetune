@@ -181,11 +181,23 @@ class CompatCheckpointInfo:
             p.kind == inspect.Parameter.VAR_KEYWORD
             for p in sig.parameters.values()
         )
+        lora_enabled = False
+        lora_rank = 64
+        lora_scaling = 2.0
         if lm_kwargs_overrides:
             unsupported: list[str] = []
             safe_overrides: dict[str, Any] = {}
             for key, value in lm_kwargs_overrides.items():
-                if key in lm_kwargs or key in accepted:
+                if key == "lora":
+                    lora_enabled = bool(value)
+                    continue
+                if key == "lora_rank":
+                    lora_rank = int(value)
+                    continue
+                if key == "lora_scaling":
+                    lora_scaling = float(value)
+                    continue
+                if key in lm_kwargs or key in accepted or accepts_var_kwargs:
                     safe_overrides[key] = value
                 else:
                     unsupported.append(key)
@@ -212,6 +224,17 @@ class CompatCheckpointInfo:
         else:
             model = LMModel(**ctor_kwargs)
             model = model.to(device=device, dtype=dtype)
+
+        if lora_enabled:
+            from moshi.modules.lora import replace_all_linear_with_lora
+
+            replace_all_linear_with_lora(
+                model,
+                rank=lora_rank,
+                scaling=lora_scaling,
+                device=device,
+                dtype=dtype,
+            )
 
         if not load_weight:
             return model
