@@ -1,6 +1,6 @@
 [project]
 name = "finetune"
-requires-python = ">= 3.10"
+requires-python = ">= 3.10, < 3.12"
 description = "finetune moshi models"
 dynamic = ["version"]
 readme = "README.md"
