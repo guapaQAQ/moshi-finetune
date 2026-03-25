@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import safetensors.torch
 import torch
 from moshi.modules.lora import LoRALinear
+
+# Ensure local `finetune` package is importable even when running as a raw script.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from finetune.model_loading import build_checkpoint_info, get_lm_config
 
