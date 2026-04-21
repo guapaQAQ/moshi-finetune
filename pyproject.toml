@@ -27,6 +27,7 @@ dependencies = [
   "submitit",
   "llvmlite>=0.44",
   "numba>=0.61",
+  "soundfile>=0.13.1",
 ]
 
 [project.optional-dependencies]
@@ -78,8 +79,8 @@ follow_imports = "normal"
 
 [tool.ruff]
 lint.select = ["E", "F", "W", "C90", "I", "C4", "PT", "RSE", "TID", "TCH", "FLY", "NPY", "RUF", "T10"]
-line-length = 88
 lint.ignore = ["E501"]
+line-length = 88
 target-version = "py38"
 exclude = [".git","__pycache__",".vscode",".mypy_cache"]
 
