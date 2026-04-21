@@ -7,8 +7,8 @@
 
 # data
 data:
-  train_data: "data/gametime_train_all_basic.jsonl"
-  eval_data: "data/gametime_test_basic.jsonl"
+  train_data: "data/gametime_train_advanced.jsonl"
+  eval_data: "data/gametime_test_advanced.jsonl"
   shuffle: true
 
 # model
@@ -44,11 +44,10 @@ do_ckpt: true
 ckpt_freq: 250
 
 save_adapters: true
-run_dir: "../saves/personaplex/gametime_basic_lora"
+run_dir: "../saves/personaplex/gametime_advanced_lora"
 
 # Optional.
-# wandb:
-#   project: "personaplex-gametime"
-#   run_name: "personaplex_7B_gametime_basic_lora"
-#   key: null
-#   offline: false
+wandb:
+  project: "moshi-gametime"
+  run_name: "personaplex_7B_gametime_advanced"
+  key: "131f192f269eca7a738b239324dee215e74d2bb5"  
