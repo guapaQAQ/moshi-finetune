@@ -430,7 +430,7 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
         avg_loss = avg_aggregate(loss_item)
         state.end_step(n_batch_tokens=codes.numel())
 
-        if state.step % args.log_freq == 0:
+        if state.step % args.log_freq == 0 or is_last_step:
             logs = {
                 "step": state.step,
                 "loss": avg_loss,
@@ -442,11 +442,16 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
                 "adv_std": advantages.std().item(),
                 "lr": last_lr,
             }
-            main_logger_info(
-                f"step={state.step} loss={avg_loss:.4f} pg={logs['pg_loss']:.4f} "
-                f"kl={logs['kl']:.4f} reward={logs['reward_mean']:.3f}"
-            )
-            metrics_logger.log(logs, step=state.step)
+            if state.step % args.log_freq == 0:
+                main_logger_info(
+                    f"step={state.step} loss={avg_loss:.4f} pg={logs['pg_loss']:.4f} "
+                    f"kl={logs['kl']:.4f} reward={logs['reward_mean']:.3f}"
+                )
+                metrics_logger.log(logs, step=state.step)
+            # Drop the final metrics so online_grpo can forward them to its single
+            # wandb run -- works even for short iters where step < log_freq.
+            if is_last_step and get_rank() == 0:
+                (Path(args.run_dir) / "last_metrics.json").write_text(json.dumps(logs))
 
         if args.do_ckpt and (
             (args.ckpt_freq > 0 and state.step % args.ckpt_freq == 0) or is_last_step
