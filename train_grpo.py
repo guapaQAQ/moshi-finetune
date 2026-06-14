@@ -386,8 +386,12 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
         # path (sum over tokens with no per-sample normalization) does not
         # match any of the three published GRPO variants and made the
         # nominal beta = 0.02 KL penalty ~100x weaker than intended.
-        text_logp_avg = per_sample_avg_logp(text_logp_pi, text_mask)
-        audio_logp_avg = per_sample_avg_logp(audio_logp_pi, audio_mask)
+        # logp tensors are [batch, channels, T] (text: 1 channel, audio: dep_q=8
+        # codebooks). Flatten the channel+time dims so the per-sample logprob is
+        # [batch] -- otherwise audio keeps its 8-codebook dim and `advantages *
+        # logprob` mismatches (advantages is [batch]).
+        text_logp_avg = per_sample_avg_logp(text_logp_pi.flatten(1), text_mask.flatten(1))
+        audio_logp_avg = per_sample_avg_logp(audio_logp_pi.flatten(1), audio_mask.flatten(1))
         logprob = text_logp_avg + audio_logp_avg
 
         kl_term = torch.zeros((), device=logprob.device)
