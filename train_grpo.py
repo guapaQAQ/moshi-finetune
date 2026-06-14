@@ -133,6 +133,11 @@ def per_token_logprob(
     # `mask` anyway, so the clamped value is never used.
     safe_target = target.clamp(0, log_probs.size(-1) - 1)
     gathered = torch.gather(log_probs, dim=-1, index=safe_target.unsqueeze(-1)).squeeze(-1)
+    # Zero the logπ at masked positions BEFORE any downstream `* mask`. Masked
+    # positions (special/forbidden tokens) can carry -inf logprob, and -inf * 0
+    # = nan would poison the per-sample logp and the KL term. where() makes them
+    # exactly 0 so they drop out cleanly.
+    gathered = torch.where(mask.bool(), gathered, torch.zeros_like(gathered))
     return gathered, mask.float()
 
 
