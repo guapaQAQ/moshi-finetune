@@ -125,7 +125,14 @@ def per_token_logprob(
     """Return (per-token logπ, float mask) — both shaped like `target`."""
     log_probs = torch.log_softmax(logits.float(), dim=-1)
     target = target.long()
-    gathered = torch.gather(log_probs, dim=-1, index=target.unsqueeze(-1)).squeeze(-1)
+    # `target` (the codes) includes special tokens (zero_token_id / padding) at
+    # positions that are masked out downstream, but their values can exceed the
+    # logits' vocab dim and trip a CUDA "index out of bounds" in gather. The
+    # model's *embedding* is sized to include those tokens, but the logits are
+    # not. Clamp into range before gathering; those positions are zeroed by
+    # `mask` anyway, so the clamped value is never used.
+    safe_target = target.clamp(0, log_probs.size(-1) - 1)
+    gathered = torch.gather(log_probs, dim=-1, index=safe_target.unsqueeze(-1)).squeeze(-1)
     return gathered, mask.float()
 
 
