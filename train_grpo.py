@@ -55,12 +55,20 @@ def parse_cli() -> argparse.Namespace:
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--reward_manifest", type=str, required=True)
     parser.add_argument("--group_size", type=int, default=4)
+    # Two flags instead of argparse.BooleanOptionalAction, which needs Python
+    # 3.9+ and would blow up at parse time on a stray 3.8 interpreter.
     parser.add_argument(
         "--normalize_advantage",
-        action=argparse.BooleanOptionalAction,
+        dest="normalize_advantage",
+        action="store_true",
         default=True,
-        help="Divide group advantages by their std. --no-normalize-advantage "
-        "disables it (Dr. GRPO-style) for ablations.",
+        help="Divide group advantages by their std (default on).",
+    )
+    parser.add_argument(
+        "--no_normalize_advantage",
+        dest="normalize_advantage",
+        action="store_false",
+        help="Disable advantage normalization (Dr. GRPO-style) for ablations.",
     )
     parser.add_argument("--advantage_eps", type=float, default=1e-6)
     parser.add_argument(
@@ -527,6 +535,13 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
                 "Online multi-GPU requires MOSHI_NO_SHARD=1 (manual data-parallel "
                 "raw replicas). Without it the model is FSDP-sharded and in-process "
                 "generation fails. Set MOSHI_NO_SHARD=1 (the pipeline does this)."
+            )
+        if cli.prompts_per_iter < get_world_size():
+            raise RuntimeError(
+                f"--prompts_per_iter ({cli.prompts_per_iter}) must be >= world_size "
+                f"({get_world_size()}): each rank gets prompts[rank::world], so a "
+                "smaller window leaves some rank with an empty shard. Increase "
+                "PROMPTS or reduce ONLINE_GPUS."
             )
         repo_root = cli.repo_root or str(Path(__file__).resolve().parents[1])
         if repo_root not in sys.path:
