@@ -119,6 +119,14 @@ def get_fsdp_model(
     elif args.param_dtype == "float32":
         param_dtype = torch.float32
 
+    # Online GRPO needs in-process generation, which FSDP (per-block wrapping)
+    # breaks: LMGen's streaming forward bypasses the FSDP root and trips the
+    # `_is_root` assertion. MOSHI_NO_SHARD=1 instead replicates a full raw model
+    # on every rank (no FSDP wrapper) -- generation uses the validated single-GPU
+    # path, and train_grpo manually all-reduces the LoRA grads. The 7B fits on
+    # one H100, so replication is fine.
+    manual_dp = os.environ.get("MOSHI_NO_SHARD") == "1" and get_world_size() > 1
+
     with torch.device("meta"):
         model = checkpointer_info.get_moshi(
             device="meta",
@@ -132,7 +140,7 @@ def get_fsdp_model(
             load_weight=False,
         )
 
-    if get_rank() == 0:
+    if get_rank() == 0 or manual_dp:
         moshi_weight = checkpointer_info.moshi_weights
 
         assert is_safetensors(moshi_weight), "Model is not safetensors"
@@ -216,26 +224,24 @@ def get_fsdp_model(
         for param in model.parameters():
             param.requires_grad = True
 
-    if get_world_size() == 1:
+    # Single GPU, or manual data-parallel (online GRPO): return the raw replicated
+    # model. In manual_dp every rank already loaded full weights above; train_grpo
+    # broadcasts the LoRA from rank 0 and all-reduces its grads each step.
+    if get_world_size() == 1 or manual_dp:
+        if manual_dp:
+            main_logger_info(
+                f"Manual data-parallel: replicated raw model over "
+                f"{get_world_size()} GPUs (no FSDP, for in-process generation)."
+            )
         return model.cuda()
 
     auto_wrap_policy = get_fsdp_policy(args.lora.enable)
 
-    # Online GRPO generates in-process with the resident model, which needs full
-    # (non-sharded) params on every rank. NO_SHARD replicates like DDP (the 7B
-    # fits on one H100) so LMGen(model.module) works while gradients still
-    # all-reduce across ranks. FULL_SHARD (the default) would shard params and
-    # break generation.
-    no_shard = os.environ.get("MOSHI_NO_SHARD") == "1"
-    strategy = ShardingStrategy.NO_SHARD if no_shard else ShardingStrategy.FULL_SHARD
-    main_logger_info(
-        f"{'Replicating (NO_SHARD)' if no_shard else 'Sharding (FULL_SHARD)'} "
-        f"model over {get_world_size()} GPUs ..."
-    )
+    main_logger_info(f"Sharding model over {get_world_size()} GPUs ...")
 
     wrapped_model = FullyShardedDataParallel(
         model,
-        sharding_strategy=strategy,
+        sharding_strategy=ShardingStrategy.FULL_SHARD,
         auto_wrap_policy=auto_wrap_policy,
         backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
         limit_all_gathers=True,

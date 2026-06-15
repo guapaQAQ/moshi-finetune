@@ -418,6 +418,17 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
     model = get_fsdp_model(args, checkpoint_info)
     spm = checkpoint_info.get_text_tokenizer()
 
+    # Manual data-parallel (online multi-GPU): the model is a raw replica on every
+    # rank (no FSDP, so in-process generation works). The per-rank seed gave each
+    # rank a DIFFERENT LoRA init, so broadcast rank 0's LoRA to make every replica
+    # identical; grads are all-reduced each step (below) to keep them in sync.
+    is_dp = get_world_size() > 1
+    if is_dp:
+        for p in model.parameters():
+            if p.requires_grad:
+                dist.broadcast(p.data, src=0)
+        main_logger_info(f"Manual DP: broadcast LoRA from rank 0 to {get_world_size()} ranks")
+
     interleaver = Interleaver(
         spm,
         mimi.frame_rate,
@@ -444,7 +455,7 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
         # Multi-GPU: model is FSDP(NO_SHARD)-wrapped; LMGen needs the underlying
         # LMModel (full params present under NO_SHARD). Single-GPU: model is the
         # raw LMModel already.
-        gen_model = getattr(model, "module", model)
+        gen_model = getattr(model, "module", model)  # raw LMModel (manual DP / single GPU)
         lm_gen = LMGen(gen_model, **checkpoint_info.lm_gen_config)
         maybe_set_temp(lm_gen, cli.gen_temp, cli.gen_temp_text)
         with Path(cli.egs_file).open() as f:
@@ -622,6 +633,16 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
         pg_loss = -(advantages * logprob).mean()
         loss = pg_loss + cli.kl_coef * kl_term
         loss.backward()
+
+        # Manual data-parallel: average LoRA grads across ranks so every replica
+        # takes the same optimizer step and stays identical. (Each rank trained on
+        # its own prompt shard, so this is standard data-parallel grad averaging.)
+        if is_dp:
+            ws = get_world_size()
+            for p in model.parameters():
+                if p.grad is not None:
+                    dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
+                    p.grad /= ws
 
         upcast_mixed_precision(model.parameters(), optim_dtype=optim_dtype)
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_norm)
