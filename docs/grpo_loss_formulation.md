@@ -140,6 +140,33 @@ Fix: `set_random_seed(args.seed + get_rank())`. Each rank now samples a
 different group per step. For single-GPU runs (the cluster's current
 setup with `train_moshi.sh`) this is a no-op.
 
+## Clipped surrogate, KL clamp, text/audio pooling (2026-06)
+
+The objective is now the canonical clipped GRPO surrogate, not bare
+REINFORCE. At each online refresh the behaviour-policy per-sample logπ
+(`logp_old`) is cached (`cache_logp_old`); each optimizer step forms the
+ratio `exp(logπ − logp_old)` and the clipped surrogate
+`min(ratio·A, clip(ratio, 1±ε)·A)`, `ε = --clip_eps` (default 0.2).
+`--clip_eps 0` falls back to group-baseline REINFORCE. With
+`--refresh_every 1` (fully on-policy) the ratio is ≈1 so the clip is a
+no-op; it only bites when a rollout batch is reused off-policy
+(`refresh_every > 1`).
+
+The k3 KL log-ratio is clamped to `[-20, 20]` before `exp()` to avoid
+inf/NaN under large divergence.
+
+`--logp_pool` selects per-sample logπ aggregation: `split` (default)
+averages text and audio separately then sums (equal text/audio weight
+regardless of token counts); `token` pools all completion tokens into one
+mean (token-proportional, audio-dominant for Moshi). Treat the choice as
+an ablation knob; `split` is the project default.
+
+Multi-GPU online uses **manual data-parallel** (raw replicated model, not
+FSDP, since FSDP per-block wrapping breaks in-process LMGen generation).
+Each rank generates its own prompt shard, so its local group baseline IS
+the correct per-prompt advantage; LoRA grads are all-reduced. This is
+equivalent to grouped GRPO, not a deviation.
+
 ## References
 
 - Shao et al. 2024, "DeepSeekMath: Pushing the Limits of Mathematical

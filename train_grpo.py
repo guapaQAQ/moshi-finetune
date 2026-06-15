@@ -57,6 +57,24 @@ def parse_cli() -> argparse.Namespace:
     parser.add_argument("--group_size", type=int, default=4)
     parser.add_argument("--normalize_advantage", action="store_true", default=True)
     parser.add_argument("--advantage_eps", type=float, default=1e-6)
+    parser.add_argument(
+        "--clip_eps",
+        type=float,
+        default=0.2,
+        help="PPO/GRPO clip range ε for the importance-ratio surrogate. The "
+        "behavior-policy logprob is cached at each refresh; off-policy reuse "
+        "(refresh_every>1) is then correctly clipped. 0 = plain REINFORCE (no "
+        "ratio). At refresh_every=1 the ratio is ~1 so this is a no-op.",
+    )
+    parser.add_argument(
+        "--logp_pool",
+        type=str,
+        default="split",
+        choices=["split", "token"],
+        help="Per-sample logprob aggregation. 'split': mean(text)+mean(audio) "
+        "(equal text/audio weight). 'token': pool all completion tokens, one "
+        "mean (canonical GRPO; audio-dominant by token count).",
+    )
     parser.add_argument("--reward_scale", type=float, default=1.0)
     parser.add_argument("--min_group_size", type=int, default=2)
     parser.add_argument("--sample_with_replacement", action="store_true", default=True)
@@ -298,11 +316,47 @@ def per_sample_avg_logp(
     return (per_tok * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1)
 
 
+def combine_logprob(
+    output: Any, codes: torch.Tensor, model: Any, pool: str
+) -> torch.Tensor:
+    """Per-sample logπ [batch] from a model output, with text/audio aggregated
+    per `pool` ('split' = equal text/audio weight, 'token' = pooled token mean).
+    Shared by the training step (with grad) and logp_old caching (no_grad)."""
+    text_target = codes[:, : model.audio_offset]
+    audio_target = codes[:, model.audio_offset : model.audio_offset + model.dep_q]
+    tlp, tm = per_token_logprob(output.text_logits, text_target, output.text_mask)
+    alp, am = per_token_logprob(output.logits, audio_target, output.mask)
+    tl, tm = tlp.flatten(1), tm.flatten(1)
+    al, am = alp.flatten(1), am.flatten(1)
+    if pool == "token":
+        return ((tl * tm).sum(1) + (al * am).sum(1)) / (
+            tm.sum(1) + am.sum(1)
+        ).clamp(min=1.0)
+    return per_sample_avg_logp(tl, tm) + per_sample_avg_logp(al, am)
+
+
+def cache_logp_old(model, groups, tokenizer, target_sr, pool) -> None:
+    """Compute & store each sample's behavior-policy logπ (logp_old) at refresh
+    time, so off-policy reuse within the refresh window is correctly ratio'd."""
+    with torch.no_grad():
+        for items in groups.values():
+            batch, _ = build_batch(items, tokenizer, target_sr=target_sr)
+            cond = None
+            if batch.condition_attributes is not None:
+                cond = model.condition_provider.prepare(batch.condition_attributes)
+            out = model(codes=batch.codes, condition_tensors=cond)
+            lp = combine_logprob(out, batch.codes, model, pool)
+            for it, v in zip(items, lp.tolist()):
+                it["logp_old"] = v
+
+
 def kl_k3(
     logp_pi: torch.Tensor, logp_ref: torch.Tensor, mask: torch.Tensor
 ) -> torch.Tensor:
     """Unbiased low-variance KL estimator from DeepSeek GRPO (Schulman k3)."""
-    log_ratio = logp_ref - logp_pi
+    # Clamp the log-ratio before exp() so a large policy/ref divergence (or a
+    # stray logprob) can't blow exp() up to inf/NaN (matches ms-swift's guard).
+    log_ratio = (logp_ref - logp_pi).clamp(-20.0, 20.0)
     kl_per_tok = log_ratio.exp() - log_ratio - 1.0
     denom = mask.sum().clamp(min=1.0)
     return (kl_per_tok * mask).sum() / denom
@@ -563,6 +617,13 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
             online_state["since_refresh"] = 0
             if new_ids:
                 groups, group_ids = new_groups, new_ids
+                # Freeze the behavior-policy logprob for the fresh batch so the
+                # next refresh_every steps clip correctly against it (#1).
+                if cli.clip_eps > 0:
+                    cache_logp_old(
+                        model, groups, interleaved_tokenizer,
+                        int(mimi.sample_rate), cli.logp_pool,
+                    )
             elif group_ids:
                 # Keep the previous batch: every rank MUST take a step together or
                 # FSDP/DDP grad all-reduce deadlocks. Never `continue` in the loop.
@@ -608,9 +669,18 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
         # codebooks). Flatten the channel+time dims so the per-sample logprob is
         # [batch] -- otherwise audio keeps its 8-codebook dim and `advantages *
         # logprob` mismatches (advantages is [batch]).
-        text_logp_avg = per_sample_avg_logp(text_logp_pi.flatten(1), text_mask.flatten(1))
-        audio_logp_avg = per_sample_avg_logp(audio_logp_pi.flatten(1), audio_mask.flatten(1))
-        logprob = text_logp_avg + audio_logp_avg
+        tl, tm = text_logp_pi.flatten(1), text_mask.flatten(1)
+        al, am = audio_logp_pi.flatten(1), audio_mask.flatten(1)
+        if cli.logp_pool == "token":
+            # Canonical GRPO: pool ALL completion tokens, one mean per sample.
+            # Audio (dep_q codebooks × frames) dominates text by token count.
+            logprob = ((tl * tm).sum(1) + (al * am).sum(1)) / (
+                tm.sum(1) + am.sum(1)
+            ).clamp(min=1.0)
+        else:
+            # "split" (default): mean text + mean audio -> equal text/audio weight
+            # regardless of token counts. See docs/grpo_loss_formulation.md.
+            logprob = per_sample_avg_logp(tl, tm) + per_sample_avg_logp(al, am)
 
         kl_term = torch.zeros((), device=logprob.device)
         if use_kl:
@@ -633,7 +703,18 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
             advantages = advantages / (advantages.std() + cli.advantage_eps)
         advantages = advantages.detach()
 
-        pg_loss = -(advantages * logprob).mean()
+        # Clipped GRPO/PPO surrogate when logp_old is cached (online refresh) and
+        # clip_eps>0; otherwise plain group-baseline REINFORCE. At refresh_every=1
+        # logp_old == current logprob (ratio≈1), so this is a no-op there.
+        if cli.clip_eps > 0 and all("logp_old" in s for s in selected):
+            logp_old = torch.tensor(
+                [s["logp_old"] for s in selected], device=logprob.device
+            )
+            ratio = torch.exp(logprob - logp_old)
+            clipped = torch.clamp(ratio, 1.0 - cli.clip_eps, 1.0 + cli.clip_eps)
+            pg_loss = -torch.min(ratio * advantages, clipped * advantages).mean()
+        else:
+            pg_loss = -(advantages * logprob).mean()
         loss = pg_loss + cli.kl_coef * kl_term
         loss.backward()
 
