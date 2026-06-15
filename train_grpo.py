@@ -6,6 +6,8 @@ import os
 import pprint
 import random
 import shutil
+import subprocess
+import sys
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -65,6 +67,40 @@ def parse_cli() -> argparse.Namespace:
         help="KL penalty coefficient β against the LoRA-disabled reference policy. "
         "0 reproduces the previous REINFORCE behaviour. DeepSeek default is 0.02.",
     )
+    # ---- Online (in-process) GRPO -------------------------------------------
+    # When --online is set, the resident model GENERATES its own rollouts every
+    # --refresh_every steps (no per-iter model reload), scores them via the
+    # whisper + judge servers, and trains on them. --reward_manifest is then the
+    # PATH the freshly-generated rewards are written to (re-read each refresh)
+    # instead of a static input. refresh_every=1 => fully on-policy.
+    parser.add_argument("--online", action="store_true", default=False)
+    parser.add_argument("--egs_file", type=str, default=None,
+                        help="Prompt egs (jsonl) to page rollouts from (online).")
+    parser.add_argument("--prompts_per_iter", type=int, default=8,
+                        help="Prompt-groups generated per refresh. Each optimizer "
+                        "step consumes one group, so this is how many fresh groups "
+                        "a refresh provides.")
+    parser.add_argument("--refresh_every", type=int, default=8,
+                        help="Regenerate rollouts every N optimizer steps. Set "
+                        "== prompts_per_iter to use each fresh group ~once; set "
+                        "both to 1 for maximally on-policy (1 group, 1 step).")
+    parser.add_argument("--shuffle_seed", type=int, default=0)
+    parser.add_argument("--start_cursor", type=int, default=0,
+                        help="Resume paging offset (prompts consumed so far).")
+    parser.add_argument("--audio_root", type=str, default=None)
+    parser.add_argument("--gen_temp", type=float, default=0.8)
+    parser.add_argument("--gen_temp_text", type=float, default=0.7)
+    parser.add_argument("--whisper_url", type=str, default="http://127.0.0.1:8003")
+    parser.add_argument("--judge_model", type=str, default="gemma-4-31B-it-FP8")
+    parser.add_argument("--judge_base_url", type=str, default="http://127.0.0.1:8002/v1")
+    parser.add_argument("--judge_api_key", type=str, default="dummy")
+    parser.add_argument("--judge_prompt_file", type=str, default=None)
+    parser.add_argument("--judge_max_tokens", type=int, default=2048)
+    parser.add_argument("--judge_max_workers", type=int, default=16)
+    parser.add_argument("--reward_key", type=str, default="applicable_avg")
+    parser.add_argument("--repo_root", type=str, default=None,
+                        help="Repo root for importing gametime generation + "
+                        "reward helpers (online).")
     return parser.parse_args()
 
 
@@ -94,6 +130,100 @@ def sample_group(
     if with_replacement:
         return [random.choice(group) for _ in range(group_size)]
     return group
+
+
+def _gametime_imports(repo_root: str):
+    """Lazily import the gametime generation + reward helpers (they live outside
+    moshi-finetune). Done lazily so non-online training never needs them."""
+    if repo_root and repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    from gametime.scripts.rl.collect_moshi_rollouts import (  # noqa: E402
+        TARGET_SR,
+        generate_dialogue,
+        resolve_output_paths,
+    )
+    from gametime.scripts.rl.online_grpo import align_via_server  # noqa: E402
+
+    return TARGET_SR, generate_dialogue, resolve_output_paths, align_via_server
+
+
+def online_generate_score(
+    cli: argparse.Namespace,
+    model: Any,
+    lm_gen: Any,
+    mimi: Any,
+    spm: Any,
+    frame_size: int,
+    window: list[dict[str, Any]],
+    gen_dir: Path,
+    group_size: int,
+    seed_base: int,
+) -> dict[str, list[dict[str, Any]]]:
+    """Generate rollouts in-process with the resident policy, score them via the
+    whisper + judge servers, and return the GRPO reward groups. No model reload:
+    `lm_gen` wraps the model currently being trained."""
+    import soundfile as sf
+
+    repo_root = cli.repo_root or str(Path(__file__).resolve().parents[1])
+    (TARGET_SR, generate_dialogue, resolve_output_paths,
+     align_via_server) = _gametime_imports(repo_root)
+
+    dialogue_dir = gen_dir / "dialogue"
+    align_dir = gen_dir / "alignments_whisper"
+    judge_dir = gen_dir / "judge_eval"
+
+    # ---- generate (resident model, eval+no_grad inside stream_generate) ------
+    model.eval()
+    n = 0
+    for idx, entry in enumerate(window):
+        subcategory, split, base_id = (
+            entry["subcategory"], entry.get("split", "train"), entry["id"])
+        prompt_path = entry["path"]
+        if cli.audio_root:
+            marker = "/datasets/"
+            pos = prompt_path.find(marker)
+            if pos != -1:
+                prompt_path = str(Path(cli.audio_root) / prompt_path[pos + len(marker):])
+        for k in range(group_size):
+            sample_id = f"{base_id}_sample_{k}"
+            wav_path, inner_path = resolve_output_paths(
+                gen_dir, subcategory, split, sample_id)
+            if wav_path.exists():
+                continue
+            set_random_seed(seed_base + idx * group_size + k)
+            stereo, inner_text = generate_dialogue(
+                prompt_path, lm_gen, mimi, spm, frame_size, "cuda")
+            sf.write(wav_path, stereo.T, TARGET_SR)
+            inner_path.write_text(json.dumps({"agent_a": inner_text}, indent=2))
+            n += 1
+    model.train()
+    main_logger_info(f"[online] generated {n} rollouts -> {dialogue_dir}")
+
+    # ---- score: whisper align -> json -> judge -> reward manifest ------------
+    align_via_server(dialogue_dir, align_dir, cli.whisper_url)
+    rl = Path(repo_root) / "gametime/scripts/rl"
+    judge_prompt = cli.judge_prompt_file or str(
+        Path(repo_root) / "gametime/scripts/llm_eval/prompts/qwen3_omni_text.txt")
+    subprocess.run([sys.executable, str(rl / "alignments_to_json.py"),
+                    "--align_dir", str(align_dir),
+                    "--dialogue_dir", str(dialogue_dir)], check=True)
+    subprocess.run([sys.executable,
+                    str(Path(repo_root) / "gametime/scripts/llm_eval/unified_eval.py"),
+                    "--in_dir", str(align_dir), "--out_dir", str(judge_dir),
+                    "--model", cli.judge_model, "--provider", "openai",
+                    "--base_url", cli.judge_base_url, "--api_keys", cli.judge_api_key,
+                    "--system_prompt_file", judge_prompt,
+                    "--user_text_prefix",
+                    "Please evaluate the following spoken dialogue:\n\n{alignment}",
+                    "--constraint_in_system",
+                    "--max_tokens", str(cli.judge_max_tokens),
+                    "--max_workers", str(cli.judge_max_workers),
+                    "--temperature", "0.0"], check=True)
+    subprocess.run([sys.executable, str(rl / "build_reward_manifest.py"),
+                    "--dialogue_root", str(dialogue_dir),
+                    "--score_root", str(judge_dir),
+                    "--reward_key", cli.reward_key], check=True)
+    return load_reward_manifest(judge_dir / "rewards.jsonl")
 
 
 def load_audio(path: Path, target_sr: int) -> np.ndarray:
@@ -300,10 +430,38 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
         mimi, interleaver, duration_sec=args.duration_sec
     )
 
-    groups = load_reward_manifest(Path(cli.reward_manifest))
-    group_ids = [gid for gid, items in groups.items() if len(items) >= cli.min_group_size]
-    if not group_ids:
-        raise ValueError("No reward groups meet min_group_size.")
+    # Online mode generates rollouts in-process each refresh; the static manifest
+    # is only loaded for the offline (precomputed reward) path.
+    online_state = None
+    if cli.online:
+        repo_root = cli.repo_root or str(Path(__file__).resolve().parents[1])
+        if repo_root not in sys.path:
+            sys.path.insert(0, repo_root)
+        from gametime.scripts.rl.collect_moshi_rollouts import maybe_set_temp
+        from gametime.utils.moshi_utils import get_frame_size
+        from moshi.models import LMGen
+
+        lm_gen = LMGen(model, **checkpoint_info.lm_gen_config)
+        maybe_set_temp(lm_gen, cli.gen_temp, cli.gen_temp_text)
+        with Path(cli.egs_file).open() as f:
+            egs = [json.loads(x) for x in f if x.strip()]
+        random.Random(cli.shuffle_seed).shuffle(egs)
+        online_state = {
+            "lm_gen": lm_gen,
+            "frame_size": get_frame_size(mimi),
+            "egs": egs,
+            "cursor": cli.start_cursor,
+        }
+        main_logger_info(
+            f"[online] {len(egs)} prompts, paging {cli.prompts_per_iter}/refresh, "
+            f"refresh_every={cli.refresh_every} step(s), cursor={cli.start_cursor}"
+        )
+        groups, group_ids = {}, []
+    else:
+        groups = load_reward_manifest(Path(cli.reward_manifest))
+        group_ids = [gid for gid, items in groups.items() if len(items) >= cli.min_group_size]
+        if not group_ids:
+            raise ValueError("No reward groups meet min_group_size.")
 
     param_dtype = getattr(torch, args.param_dtype)
     optim_dtype = torch.float32
@@ -362,6 +520,25 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
         state.start_step()
         is_last_step = state.step == args.max_steps
         optimizer.zero_grad()
+
+        # Online: regenerate rollouts from the CURRENT policy every refresh_every
+        # steps (refresh_every=1 => fully on-policy). No model reload -- lm_gen
+        # wraps the resident model that was just updated.
+        if online_state is not None and state.step % cli.refresh_every == 0:
+            egs, cur, P = online_state["egs"], online_state["cursor"], cli.prompts_per_iter
+            window = [egs[(cur + i) % len(egs)] for i in range(P)]
+            online_state["cursor"] = cur + P
+            gen_dir = Path(args.run_dir) / "online" / f"step_{state.step:06d}"
+            groups = online_generate_score(
+                cli, model, online_state["lm_gen"], mimi, spm,
+                online_state["frame_size"], window, gen_dir,
+                cli.group_size, args.seed + state.step * 1000,
+            )
+            group_ids = [g for g, it in groups.items() if len(it) >= cli.min_group_size]
+            if not group_ids:
+                main_logger_info(f"[online] step {state.step}: no usable groups, skipping")
+                state.end_step(n_batch_tokens=0)
+                continue
 
         group_id = random.choice(group_ids)
         selected = sample_group(
