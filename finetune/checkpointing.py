@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import shutil
 from pathlib import Path
 
@@ -108,12 +109,16 @@ class Checkpointer:
                 module._merge_lora_handle.remove()  # type: ignore
 
         offload_to_cpu = get_world_size() > 1
+        # Manual data-parallel (online GRPO multi-GPU) holds a RAW replicated model
+        # on every rank, not FSDP -- so extract/save LoRA exactly like single-GPU
+        # (no summon_full_params, plain state_dict). Without this every module
+        # fails the `is_fsdp` check and the saved lora.safetensors is empty.
+        is_raw = get_world_size() == 1 or os.environ.get("MOSHI_NO_SHARD") == "1"
         if save_only_lora:
 
             def is_trainable_fsdp(module: torch.nn.Module | FullyShardedDataParallel):
                 is_fsdp = (
-                    isinstance(module, FullyShardedDataParallel)
-                    or get_world_size() == 1
+                    isinstance(module, FullyShardedDataParallel) or is_raw
                 )
                 all_params_have_grads = is_fsdp and all(
                     p.requires_grad for p in module.parameters()
@@ -121,7 +126,7 @@ class Checkpointer:
 
                 # need to make sure only lowest fsdp wrap is used
                 is_leaf_node = is_fsdp and (
-                    get_world_size() == 1 or len(list(module.module.children())) == 0
+                    is_raw or len(list(module.module.children())) == 0
                 )  # type: ignore
 
                 return is_fsdp and all_params_have_grads and is_leaf_node
@@ -134,15 +139,14 @@ class Checkpointer:
             states = {}
             for key, module in modules.items():
                 assert (
-                    isinstance(module, FullyShardedDataParallel)
-                    or get_world_size() == 1
+                    isinstance(module, FullyShardedDataParallel) or is_raw
                 ), (
                     "`module` should be an instance of `FullyShardedDataParallel` if `world_size > 1`"
                 )
                 parent_prefix = key.replace("_fsdp_wrapped_module.", "").replace(
                     "_checkpoint_wrapped_module.", ""
                 )
-                if get_world_size() > 1:
+                if not is_raw:
                     with module.summon_full_params(
                         module, writeback=True, offload_to_cpu=offload_to_cpu
                     ):
@@ -178,12 +182,11 @@ class Checkpointer:
 
             # make sure you have enough CPU RAM available to save the full model
             assert (
-                isinstance(self.model, FullyShardedDataParallel)
-                or get_world_size() == 1
+                isinstance(self.model, FullyShardedDataParallel) or is_raw
             ), (
                 "`self.model` should be an instance of `FullyShardedDataParallel` if `world_size > 1`"
             )
-            if get_world_size() > 1:
+            if not is_raw:
                 with self.model.summon_full_params(
                     self.model, writeback=True, offload_to_cpu=offload_to_cpu
                 ):
