@@ -451,6 +451,7 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
             "frame_size": get_frame_size(mimi),
             "egs": egs,
             "cursor": cli.start_cursor,
+            "since_refresh": 0,
         }
         main_logger_info(
             f"[online] {len(egs)} prompts, paging {cli.prompts_per_iter}/refresh, "
@@ -523,8 +524,12 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
 
         # Online: regenerate rollouts from the CURRENT policy every refresh_every
         # steps (refresh_every=1 => fully on-policy). No model reload -- lm_gen
-        # wraps the resident model that was just updated.
-        if online_state is not None and state.step % cli.refresh_every == 0:
+        # wraps the resident model that was just updated. Always refresh when
+        # there is no batch yet (first step / after a skip) -- a step-modulo
+        # alone would miss the first step since state.step does not start at 0.
+        if online_state is not None and (
+            not group_ids or online_state["since_refresh"] >= cli.refresh_every
+        ):
             egs, cur, P = online_state["egs"], online_state["cursor"], cli.prompts_per_iter
             window = [egs[(cur + i) % len(egs)] for i in range(P)]
             online_state["cursor"] = cur + P
@@ -535,10 +540,13 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
                 cli.group_size, args.seed + state.step * 1000,
             )
             group_ids = [g for g, it in groups.items() if len(it) >= cli.min_group_size]
+            online_state["since_refresh"] = 0
             if not group_ids:
                 main_logger_info(f"[online] step {state.step}: no usable groups, skipping")
                 state.end_step(n_batch_tokens=0)
                 continue
+        if online_state is not None:
+            online_state["since_refresh"] += 1
 
         group_id = random.choice(group_ids)
         selected = sample_group(
