@@ -142,11 +142,15 @@ setup with `train_moshi.sh`) this is a no-op.
 
 ## Clipped surrogate, KL clamp, text/audio pooling (2026-06)
 
-The objective is now the canonical clipped GRPO surrogate, not bare
-REINFORCE. At each online refresh the behaviour-policy per-sample logπ
-(`logp_old`) is cached (`cache_logp_old`); each optimizer step forms the
-ratio `exp(logπ − logp_old)` and the clipped surrogate
-`min(ratio·A, clip(ratio, 1±ε)·A)`, `ε = --clip_eps` (default 0.2).
+The objective is a **sequence-level** clipped surrogate (PPO/GRPO-style),
+not bare REINFORCE — but note it is NOT the per-token canonical form:
+ms-swift/TRL compute the ratio per token *before* aggregation, whereas
+here the per-sample logπ is aggregated first and a single scalar ratio is
+clipped per sample. At each online refresh the behaviour-policy per-sample
+logπ (`logp_old`) is cached (`cache_logp_old`, eval mode); each optimizer
+step forms the ratio `exp(logπ − logp_old)` and the clipped surrogate
+`min(ratio·A, clip(ratio, 1±ε)·A)`, `ε = --clip_eps` (default 0.2). Moving
+to a per-token ratio is a possible future refinement.
 `--clip_eps 0` falls back to group-baseline REINFORCE. With
 `--refresh_every 1` (fully on-policy) the ratio is ≈1 so the clip is a
 no-op; it only bites when a rollout batch is reused off-policy

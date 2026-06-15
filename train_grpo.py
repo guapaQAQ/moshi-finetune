@@ -55,7 +55,13 @@ def parse_cli() -> argparse.Namespace:
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--reward_manifest", type=str, required=True)
     parser.add_argument("--group_size", type=int, default=4)
-    parser.add_argument("--normalize_advantage", action="store_true", default=True)
+    parser.add_argument(
+        "--normalize_advantage",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Divide group advantages by their std. --no-normalize-advantage "
+        "disables it (Dr. GRPO-style) for ablations.",
+    )
     parser.add_argument("--advantage_eps", type=float, default=1e-6)
     parser.add_argument(
         "--clip_eps",
@@ -338,6 +344,10 @@ def combine_logprob(
 def cache_logp_old(model, groups, tokenizer, target_sr, pool) -> None:
     """Compute & store each sample's behavior-policy logπ (logp_old) at refresh
     time, so off-policy reuse within the refresh window is correctly ratio'd."""
+    # eval mode for a deterministic behavior-policy logprob (matches generation,
+    # which ran under eval; guards against future dropout). Restore afterwards.
+    was_training = model.training
+    model.eval()
     with torch.no_grad():
         for items in groups.values():
             batch, _ = build_batch(items, tokenizer, target_sr=target_sr)
@@ -348,6 +358,8 @@ def cache_logp_old(model, groups, tokenizer, target_sr, pool) -> None:
             lp = combine_logprob(out, batch.codes, model, pool)
             for it, v in zip(items, lp.tolist()):
                 it["logp_old"] = v
+    if was_training:
+        model.train()
 
 
 def kl_k3(
@@ -479,7 +491,10 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
     # rank (no FSDP, so in-process generation works). The per-rank seed gave each
     # rank a DIFFERENT LoRA init, so broadcast rank 0's LoRA to make every replica
     # identical; grads are all-reduced each step (below) to keep them in sync.
-    is_dp = get_world_size() > 1
+    # Gate on MOSHI_NO_SHARD too: only that mode returns a raw replica. A plain
+    # multi-GPU run (FSDP FULL_SHARD) must NOT manual-broadcast/all-reduce or it
+    # double-syncs and corrupts FSDP's own reduction.
+    is_dp = os.environ.get("MOSHI_NO_SHARD") == "1" and get_world_size() > 1
     if is_dp:
         for p in model.parameters():
             if p.requires_grad:
@@ -692,9 +707,20 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
                 audio_logp_ref, _ = per_token_logprob(
                     ref_output.logits, audio_target, output.mask
                 )
-            kl_term = kl_k3(text_logp_pi, text_logp_ref.detach(), text_mask) + kl_k3(
-                audio_logp_pi, audio_logp_ref.detach(), audio_mask
-            )
+            if cli.logp_pool == "token":
+                # Pool text+audio tokens so the KL denominator matches the
+                # token-pooled policy term (otherwise KL keeps equal text/audio
+                # weight while the PG term is token-proportional).
+                pi = torch.cat([text_logp_pi.flatten(1), audio_logp_pi.flatten(1)], 1)
+                ref = torch.cat(
+                    [text_logp_ref.flatten(1), audio_logp_ref.flatten(1)], 1
+                )
+                km = torch.cat([text_mask.flatten(1), audio_mask.flatten(1)], 1)
+                kl_term = kl_k3(pi, ref.detach(), km)
+            else:
+                kl_term = kl_k3(
+                    text_logp_pi, text_logp_ref.detach(), text_mask
+                ) + kl_k3(audio_logp_pi, audio_logp_ref.detach(), audio_mask)
 
         rewards = rewards * cli.reward_scale
         baseline = rewards.mean()
