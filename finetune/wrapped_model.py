@@ -1,6 +1,7 @@
 import functools
 import logging
 import math
+import os
 from typing import Callable, Union
 
 import safetensors
@@ -220,11 +221,21 @@ def get_fsdp_model(
 
     auto_wrap_policy = get_fsdp_policy(args.lora.enable)
 
-    main_logger_info(f"Sharding model over {get_world_size()} GPUs ...")
+    # Online GRPO generates in-process with the resident model, which needs full
+    # (non-sharded) params on every rank. NO_SHARD replicates like DDP (the 7B
+    # fits on one H100) so LMGen(model.module) works while gradients still
+    # all-reduce across ranks. FULL_SHARD (the default) would shard params and
+    # break generation.
+    no_shard = os.environ.get("MOSHI_NO_SHARD") == "1"
+    strategy = ShardingStrategy.NO_SHARD if no_shard else ShardingStrategy.FULL_SHARD
+    main_logger_info(
+        f"{'Replicating (NO_SHARD)' if no_shard else 'Sharding (FULL_SHARD)'} "
+        f"model over {get_world_size()} GPUs ..."
+    )
 
     wrapped_model = FullyShardedDataParallel(
         model,
-        sharding_strategy=ShardingStrategy.FULL_SHARD,
+        sharding_strategy=strategy,
         auto_wrap_policy=auto_wrap_policy,
         backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
         limit_all_gathers=True,

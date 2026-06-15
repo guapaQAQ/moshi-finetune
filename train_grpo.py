@@ -441,7 +441,11 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
         from gametime.utils.moshi_utils import get_frame_size
         from moshi.models import LMGen
 
-        lm_gen = LMGen(model, **checkpoint_info.lm_gen_config)
+        # Multi-GPU: model is FSDP(NO_SHARD)-wrapped; LMGen needs the underlying
+        # LMModel (full params present under NO_SHARD). Single-GPU: model is the
+        # raw LMModel already.
+        gen_model = getattr(model, "module", model)
+        lm_gen = LMGen(gen_model, **checkpoint_info.lm_gen_config)
         maybe_set_temp(lm_gen, cli.gen_temp, cli.gen_temp_text)
         with Path(cli.egs_file).open() as f:
             egs = [json.loads(x) for x in f if x.strip()]
@@ -530,21 +534,31 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
         if online_state is not None and (
             not group_ids or online_state["since_refresh"] >= cli.refresh_every
         ):
+            W, R = get_world_size(), get_rank()
             egs, cur, P = online_state["egs"], online_state["cursor"], cli.prompts_per_iter
-            window = [egs[(cur + i) % len(egs)] for i in range(P)]
+            full_window = [egs[(cur + i) % len(egs)] for i in range(P)]
+            window = full_window[R::W]  # this rank's shard (data-parallel gen)
             online_state["cursor"] = cur + P
-            gen_dir = Path(args.run_dir) / "online" / f"step_{state.step:06d}"
-            groups = online_generate_score(
+            gen_dir = Path(args.run_dir) / "online" / f"step_{state.step:06d}" / f"rank_{R}"
+            new_groups = online_generate_score(
                 cli, model, online_state["lm_gen"], mimi, spm,
                 online_state["frame_size"], window, gen_dir,
-                cli.group_size, args.seed + state.step * 1000,
+                cli.group_size, args.seed + state.step * 1000 + R * 131,
             )
-            group_ids = [g for g, it in groups.items() if len(it) >= cli.min_group_size]
+            new_ids = [g for g, it in new_groups.items() if len(it) >= cli.min_group_size]
             online_state["since_refresh"] = 0
-            if not group_ids:
-                main_logger_info(f"[online] step {state.step}: no usable groups, skipping")
-                state.end_step(n_batch_tokens=0)
-                continue
+            if new_ids:
+                groups, group_ids = new_groups, new_ids
+            elif group_ids:
+                # Keep the previous batch: every rank MUST take a step together or
+                # FSDP/DDP grad all-reduce deadlocks. Never `continue` in the loop.
+                main_logger_info(
+                    f"[online] step {state.step} rank {R}: empty refresh, reusing prev batch"
+                )
+            else:
+                raise RuntimeError(
+                    f"[online] rank {R}: first refresh produced no usable groups"
+                )
         if online_state is not None:
             online_state["since_refresh"] += 1
 
