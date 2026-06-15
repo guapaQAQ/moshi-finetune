@@ -370,6 +370,34 @@ def cache_logp_old(model, groups, tokenizer, target_sr, pool) -> None:
         model.train()
 
 
+def aggregate_scores(groups: dict[str, list[dict[str, Any]]]) -> dict[str, float]:
+    """Mean reward + per-dimension judge scores (IF/TT/RA) over all samples in
+    `groups`, for wandb. Skips dims the judge left None (applicable_avg masking)
+    so each dimension averages only where it applies."""
+    dims = {
+        "instruction_following": "IF",
+        "turn_taking": "TT",
+        "response_appropriateness": "RA",
+    }
+    acc: dict[str, list[float]] = {d: [] for d in dims}
+    rewards: list[float] = []
+    for items in groups.values():
+        for it in items:
+            rewards.append(float(it.get("reward", 0.0)))
+            sc = it.get("scores") or {}
+            for d in dims:
+                v = sc.get(d)
+                if v is not None:
+                    acc[d].append(float(v))
+    out: dict[str, float] = {}
+    if rewards:
+        out["rollout/reward"] = sum(rewards) / len(rewards)
+    for d, short in dims.items():
+        if acc[d]:
+            out[f"rollout/{short}"] = sum(acc[d]) / len(acc[d])
+    return out
+
+
 def kl_k3(
     logp_pi: torch.Tensor, logp_ref: torch.Tensor, mask: torch.Tensor
 ) -> torch.Tensor:
@@ -663,6 +691,8 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
             online_state["since_refresh"] = 0
             if new_ids:
                 groups, group_ids = new_groups, new_ids
+                # Per-dimension rollout quality (IF/TT/RA + reward) for wandb.
+                online_state["rollout_metrics"] = aggregate_scores(new_groups)
                 # Freeze the behavior-policy logprob for the fresh batch so the
                 # next refresh_every steps clip correctly against it (#1).
                 if cli.clip_eps > 0:
@@ -808,6 +838,10 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
                 "adv_std": advantages.std().item(),
                 "lr": last_lr,
             }
+            # Per-dimension rollout scores from the most recent refresh (online).
+            # rank-0 shard only (the wandb logger is master-only anyway).
+            if online_state is not None and "rollout_metrics" in online_state:
+                logs.update(online_state["rollout_metrics"])
             if state.step % args.log_freq == 0:
                 main_logger_info(
                     f"step={state.step} loss={avg_loss:.4f} pg={logs['pg_loss']:.4f} "
