@@ -517,6 +517,16 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
     # is only loaded for the offline (precomputed reward) path.
     online_state = None
     if cli.online:
+        # In-process generation needs a RAW replicated model. Multi-GPU online
+        # therefore REQUIRES MOSHI_NO_SHARD=1 (manual data-parallel); otherwise
+        # get_fsdp_model returns an FSDP FULL_SHARD model whose params are sharded
+        # and whose `.module` cannot drive LMGen -> generation breaks. Fail loud.
+        if get_world_size() > 1 and os.environ.get("MOSHI_NO_SHARD") != "1":
+            raise RuntimeError(
+                "Online multi-GPU requires MOSHI_NO_SHARD=1 (manual data-parallel "
+                "raw replicas). Without it the model is FSDP-sharded and in-process "
+                "generation fails. Set MOSHI_NO_SHARD=1 (the pipeline does this)."
+            )
         repo_root = cli.repo_root or str(Path(__file__).resolve().parents[1])
         if repo_root not in sys.path:
             sys.path.insert(0, repo_root)
@@ -524,9 +534,8 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
         from gametime.utils.moshi_utils import get_frame_size
         from moshi.models import LMGen
 
-        # Multi-GPU: model is FSDP(NO_SHARD)-wrapped; LMGen needs the underlying
-        # LMModel (full params present under NO_SHARD). Single-GPU: model is the
-        # raw LMModel already.
+        # manual_dp / single-GPU: model is the raw LMModel (or has .module under a
+        # wrapper); LMGen drives it directly.
         gen_model = getattr(model, "module", model)  # raw LMModel (manual DP / single GPU)
         lm_gen = LMGen(gen_model, **checkpoint_info.lm_gen_config)
         maybe_set_temp(lm_gen, cli.gen_temp, cli.gen_temp_text)
@@ -550,6 +559,12 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
         group_ids = [gid for gid, items in groups.items() if len(items) >= cli.min_group_size]
         if not group_ids:
             raise ValueError("No reward groups meet min_group_size.")
+        if cli.clip_eps > 0:
+            main_logger_info(
+                f"[offline] clip_eps={cli.clip_eps} has NO effect: the static "
+                "reward manifest has no cached logp_old, so the surrogate falls "
+                "back to plain group-baseline REINFORCE (clipping is online-only)."
+            )
 
     param_dtype = getattr(torch, args.param_dtype)
     optim_dtype = torch.float32
