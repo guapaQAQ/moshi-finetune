@@ -418,13 +418,14 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
             "PyTorch environment is not correctly initialized. This message should only be displayed when testing."
         )
 
-    # Differentiate the seed per rank so each rank samples a different
-    # group from the reward manifest at every step. Without the rank
-    # offset every rank picks the same group_id (since `random.choice`
-    # consumes the same Python random state) and FSDP just averages
-    # identical gradients -- no data-parallel diversity benefit on
-    # multi-GPU runs. Single-GPU runs are unaffected (get_rank() == 0).
+    # Differentiate the seed per rank so each rank samples a different group at
+    # every step (data-parallel diversity). set_random_seed only seeds
+    # torch/cuda; the GRPO group selection uses python's `random` (random.choice
+    # / random.sample), so seed that too -- otherwise group selection is not
+    # reproducible (it ran off OS entropy). Single-GPU is unaffected (rank 0).
     set_random_seed(args.seed + get_rank())
+    random.seed(args.seed + get_rank())
+    np.random.seed(args.seed + get_rank())
 
     run_dir = Path(args.run_dir)
     if is_torchrun():
