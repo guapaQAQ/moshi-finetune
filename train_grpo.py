@@ -366,7 +366,10 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
             raise RuntimeError(
                 f"Run dir {run_dir} already exists. Make sure to either rename `run_dir` or remove {run_dir}."
             )
-        elif run_dir.exists():
+        elif run_dir.exists() and get_rank() == 0:
+            # Only rank 0 clears the dir; the barrier below makes the other ranks
+            # wait. Without the rank gate, ranks race in rmtree and hit
+            # FileNotFoundError on entries a peer already deleted.
             main_logger_info(f"Removing run dir {run_dir}...")
             shutil.rmtree(run_dir)
 
@@ -378,7 +381,7 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
     dist.barrier()
     run_dir.mkdir(exist_ok=True, parents=True)
     args_path = run_dir / "args.yaml"
-    if not args_path.exists():
+    if get_rank() == 0 and not args_path.exists():
         args.save(args_path)
 
     main_logger_info(f"TrainArgs: {pprint.pformat(dataclasses.asdict(args))}")
