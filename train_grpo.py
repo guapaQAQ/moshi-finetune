@@ -103,6 +103,18 @@ def parse_cli() -> argparse.Namespace:
     parser.add_argument("--min_group_size", type=int, default=2)
     parser.add_argument("--sample_with_replacement", action="store_true", default=True)
     parser.add_argument(
+        "--select_by",
+        type=str,
+        default="uniform",
+        choices=["uniform", "advantage"],
+        help="How to pick which group to train on each step. 'uniform': random. "
+        "'advantage': sample groups with probability ∝ within-group reward std, "
+        "so zero-variance groups (no gradient) are skipped and high-signal "
+        "groups are prioritized. Doesn't install missing behavior (floored "
+        "tasks still need SFT) and can shift the train distribution off the "
+        "eval mix -- use with that in mind.",
+    )
+    parser.add_argument(
         "--kl_coef",
         type=float,
         default=0.0,
@@ -172,6 +184,24 @@ def sample_group(
     if with_replacement:
         return [random.choice(group) for _ in range(group_size)]
     return group
+
+
+def _group_reward_std(items: list[dict[str, Any]]) -> float:
+    rs = [float(it.get("reward", 0.0)) for it in items]
+    if len(rs) < 2:
+        return 0.0
+    m = sum(rs) / len(rs)
+    return (sum((r - m) ** 2 for r in rs) / len(rs)) ** 0.5
+
+
+def pick_group(group_ids, groups, select_by: str) -> str:
+    """Choose which group to train on. 'advantage' weights by within-group reward
+    std (zero-variance groups give no gradient, so they're effectively skipped;
+    high-signal groups are prioritized)."""
+    if select_by == "advantage" and len(group_ids) > 1:
+        weights = [_group_reward_std(groups[g]) + 1e-3 for g in group_ids]
+        return random.choices(group_ids, weights=weights, k=1)[0]
+    return random.choice(group_ids)
 
 
 def _gametime_imports(repo_root: str):
@@ -737,7 +767,7 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
         if online_state is not None:
             online_state["since_refresh"] += 1
 
-        group_id = random.choice(group_ids)
+        group_id = pick_group(group_ids, groups, cli.select_by)
         selected = sample_group(
             groups[group_id], cli.group_size, cli.sample_with_replacement
         )
