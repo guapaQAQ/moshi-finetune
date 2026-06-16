@@ -81,6 +81,16 @@ def parse_cli() -> argparse.Namespace:
         "ratio). At refresh_every=1 the ratio is ~1 so this is a no-op.",
     )
     parser.add_argument(
+        "--clip_level",
+        type=str,
+        default="sequence",
+        choices=["sequence", "token"],
+        help="Granularity of the PPO ratio/clip. 'sequence' (default): one ratio "
+        "per sample from the aggregated logprob. 'token': per-token ratio+clip "
+        "then mask-averaged (canonical ms-swift/TRL GRPO; better credit "
+        "assignment + length handling for Moshi's long audio).",
+    )
+    parser.add_argument(
         "--logp_pool",
         type=str,
         default="split",
@@ -349,9 +359,13 @@ def combine_logprob(
     return per_sample_avg_logp(tl, tm) + per_sample_avg_logp(al, am)
 
 
-def cache_logp_old(model, groups, tokenizer, target_sr, pool) -> None:
+def cache_logp_old(model, groups, tokenizer, target_sr, pool, clip_level) -> None:
     """Compute & store each sample's behavior-policy logπ (logp_old) at refresh
-    time, so off-policy reuse within the refresh window is correctly ratio'd."""
+    time, so off-policy reuse within the refresh window is correctly ratio'd.
+    sequence-level stores one scalar/sample; token-level stores the valid
+    per-token logπ (text + audio) so the step can form per-token ratios. The
+    valid-token sequence is deterministic per wav, so it realigns across the
+    different batch padding at step time."""
     # eval mode for a deterministic behavior-policy logprob (matches generation,
     # which ran under eval; guards against future dropout). Restore afterwards.
     was_training = model.training
@@ -363,9 +377,19 @@ def cache_logp_old(model, groups, tokenizer, target_sr, pool) -> None:
             if batch.condition_attributes is not None:
                 cond = model.condition_provider.prepare(batch.condition_attributes)
             out = model(codes=batch.codes, condition_tensors=cond)
-            lp = combine_logprob(out, batch.codes, model, pool)
-            for it, v in zip(items, lp.tolist()):
-                it["logp_old"] = v
+            if clip_level == "token":
+                codes = batch.codes
+                ttgt = codes[:, : model.audio_offset]
+                atgt = codes[:, model.audio_offset : model.audio_offset + model.dep_q]
+                tlp, tm = per_token_logprob(out.text_logits, ttgt, out.text_mask)
+                alp, am = per_token_logprob(out.logits, atgt, out.mask)
+                for b, it in enumerate(items):
+                    it["logp_old_text"] = tlp[b][tm[b].bool()].cpu()
+                    it["logp_old_audio"] = alp[b][am[b].bool()].cpu()
+            else:
+                lp = combine_logprob(out, batch.codes, model, pool)
+                for it, v in zip(items, lp.tolist()):
+                    it["logp_old"] = v
     if was_training:
         model.train()
 
@@ -698,7 +722,7 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
                 if cli.clip_eps > 0:
                     cache_logp_old(
                         model, groups, interleaved_tokenizer,
-                        int(mimi.sample_rate), cli.logp_pool,
+                        int(mimi.sample_rate), cli.logp_pool, cli.clip_level,
                     )
             elif group_ids:
                 # Keep the previous batch: every rank MUST take a step together or
@@ -793,12 +817,35 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
         # Clipped GRPO/PPO surrogate when logp_old is cached (online refresh) and
         # clip_eps>0; otherwise plain group-baseline REINFORCE. At refresh_every=1
         # logp_old == current logprob (ratio≈1), so this is a no-op there.
-        if cli.clip_eps > 0 and all("logp_old" in s for s in selected):
+        eps = cli.clip_eps
+        if eps > 0 and cli.clip_level == "token" and all(
+            "logp_old_text" in s for s in selected
+        ):
+            # Per-token ratio/clip (canonical). Scatter the cached valid-token
+            # logp_old back into batch-shaped tensors (same per-sample order as
+            # build_batch(selected)), form per-token ratios, clip, weight by the
+            # per-sample advantage, then mask-average over all tokens per sample.
+            A = advantages.view(-1, 1, 1)
+
+            def tok_surrogate(logp_pi, mask, key):
+                old = torch.zeros_like(logp_pi)
+                for b, s in enumerate(selected):
+                    old[b][mask[b].bool()] = s[key].to(logp_pi.device, logp_pi.dtype)
+                ratio = torch.exp(logp_pi - old)
+                clipped = torch.clamp(ratio, 1.0 - eps, 1.0 + eps)
+                surr = torch.min(ratio * A, clipped * A) * mask
+                return surr.sum(dim=(1, 2)), mask.sum(dim=(1, 2))
+
+            t_surr, t_n = tok_surrogate(text_logp_pi, text_mask, "logp_old_text")
+            a_surr, a_n = tok_surrogate(audio_logp_pi, audio_mask, "logp_old_audio")
+            per_sample = (t_surr + a_surr) / (t_n + a_n).clamp(min=1.0)
+            pg_loss = -per_sample.mean()
+        elif eps > 0 and all("logp_old" in s for s in selected):
             logp_old = torch.tensor(
                 [s["logp_old"] for s in selected], device=logprob.device
             )
             ratio = torch.exp(logprob - logp_old)
-            clipped = torch.clamp(ratio, 1.0 - cli.clip_eps, 1.0 + cli.clip_eps)
+            clipped = torch.clamp(ratio, 1.0 - eps, 1.0 + eps)
             pg_loss = -torch.min(ratio * advantages, clipped * advantages).mean()
         else:
             pg_loss = -(advantages * logprob).mean()
