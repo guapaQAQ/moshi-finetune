@@ -338,8 +338,15 @@ def per_token_logprob(
     # logits' vocab dim and trip a CUDA "index out of bounds" in gather. The
     # model's *embedding* is sized to include those tokens, but the logits are
     # not. Clamp into range before gathering; those positions are zeroed by
-    # `mask` anyway, so the clamped value is never used.
-    safe_target = target.clamp(0, log_probs.size(-1) - 1)
+    # `mask` anyway, so the clamped value is never used. Guard: an OOV target at
+    # an UNMASKED position would be silently corrupted by the clamp -> assert it
+    # never happens (would mean a real mask bug).
+    vocab = log_probs.size(-1)
+    oov_valid = ((target < 0) | (target >= vocab)) & mask.bool()
+    assert not bool(oov_valid.any()), (
+        "out-of-vocab target at an unmasked position — mask/logits mismatch"
+    )
+    safe_target = target.clamp(0, vocab - 1)
     gathered = torch.gather(log_probs, dim=-1, index=safe_target.unsqueeze(-1)).squeeze(-1)
     # Zero the logπ at masked positions BEFORE any downstream `* mask`. Masked
     # positions (special/forbidden tokens) can carry -inf logprob, and -inf * 0
