@@ -744,13 +744,24 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
     # lora_weight in get_fsdp_model). optimizer/scheduler/step are identical
     # across ranks (grads are synced), so rank-0's state loads correctly on all.
     if cli.resume_state and Path(cli.resume_state).exists():
-        sd = torch.load(cli.resume_state, map_location="cuda", weights_only=False)
+        # Load to CPU; the RNG states must stay CPU ByteTensors and the optimizer
+        # state is moved to the params' device explicitly below (loading straight
+        # to "cuda" breaks both).
+        sd = torch.load(cli.resume_state, map_location="cpu", weights_only=False)
         optimizer.load_state_dict(sd["optimizer"])
+        # foreach/fused AdamW requires state tensors on the params' cuda device
+        # (the 'step' tensor may stay on CPU — leave it).
+        dev = torch.device("cuda", torch.cuda.current_device())
+        for st in optimizer.state.values():
+            for kk, vv in st.items():
+                if kk != "step" and torch.is_tensor(vv):
+                    st[kk] = vv.to(dev)
         scheduler.load_state_dict(sd["scheduler"])
         state.step = int(sd["step"])
         try:
-            torch.set_rng_state(sd["rng_torch"])
-            torch.cuda.set_rng_state_all(sd["rng_cuda"])
+            torch.set_rng_state(sd["rng_torch"])  # CPU ByteTensor
+            if sd.get("rng_cuda"):
+                torch.cuda.set_rng_state(sd["rng_cuda"][0])  # this rank's 1 device
             random.setstate(sd["rng_python"])
             np.random.set_state(sd["rng_numpy"])
         except Exception as exc:  # noqa: BLE001
