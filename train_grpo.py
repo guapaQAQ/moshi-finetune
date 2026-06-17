@@ -144,12 +144,18 @@ def parse_cli() -> argparse.Namespace:
     parser.add_argument("--audio_root", type=str, default=None)
     parser.add_argument("--gen_temp", type=float, default=0.8)
     parser.add_argument("--gen_temp_text", type=float, default=0.7)
+    # Inference early-stop: halt generation once the agent has been silent for
+    # this many seconds (past --gen_min_gen_sec), skipping the long silent tail.
+    # 0 = off (generate the full prompt+tail). Big speedup + shorter rollouts.
+    parser.add_argument("--gen_early_stop_sec", type=float, default=0.0)
+    parser.add_argument("--gen_min_gen_sec", type=float, default=30.0)
+    parser.add_argument("--gen_silence_thresh", type=float, default=1e-3)
     parser.add_argument("--whisper_url", type=str, default="http://127.0.0.1:8003")
     parser.add_argument("--judge_model", type=str, default="gemma-4-31B-it-FP8")
     parser.add_argument("--judge_base_url", type=str, default="http://127.0.0.1:8002/v1")
     parser.add_argument("--judge_api_key", type=str, default="dummy")
     parser.add_argument("--judge_prompt_file", type=str, default=None)
-    parser.add_argument("--judge_max_tokens", type=int, default=1024)
+    parser.add_argument("--judge_max_tokens", type=int, default=2048)
     parser.add_argument("--judge_max_workers", type=int, default=16)
     parser.add_argument("--reward_key", type=str, default="applicable_avg")
     parser.add_argument("--repo_root", type=str, default=None,
@@ -270,7 +276,10 @@ def online_generate_score(
                 continue
             set_random_seed(seed_base + idx * group_size + k)
             stereo, inner_text = generate_dialogue(
-                prompt_path, lm_gen, mimi, spm, frame_size, "cuda")
+                prompt_path, lm_gen, mimi, spm, frame_size, "cuda",
+                early_stop_sec=cli.gen_early_stop_sec,
+                min_gen_sec=cli.gen_min_gen_sec,
+                silence_thresh=cli.gen_silence_thresh)
             sf.write(wav_path, stereo.T, TARGET_SR)
             inner_path.write_text(json.dumps({"agent_a": inner_text}, indent=2))
             n += 1
