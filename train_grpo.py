@@ -861,7 +861,9 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
                 old = torch.zeros_like(logp_pi)
                 for b, s in enumerate(selected):
                     old[b][mask[b].bool()] = s[key].to(logp_pi.device, logp_pi.dtype)
-                ratio = torch.exp(logp_pi - old)
+                # Clamp the log-ratio before exp so a single off token can't blow
+                # the ratio (and the loss) up to ~1e2 (seen at step 185).
+                ratio = torch.exp((logp_pi - old).clamp(-20.0, 20.0))
                 clipped = torch.clamp(ratio, 1.0 - eps, 1.0 + eps)
                 surr = torch.min(ratio * A, clipped * A) * mask
                 return surr.sum(dim=(1, 2)), mask.sum(dim=(1, 2))
@@ -874,7 +876,7 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
             logp_old = torch.tensor(
                 [s["logp_old"] for s in selected], device=logprob.device
             )
-            ratio = torch.exp(logprob - logp_old)
+            ratio = torch.exp((logprob - logp_old).clamp(-20.0, 20.0))
             clipped = torch.clamp(ratio, 1.0 - eps, 1.0 + eps)
             pg_loss = -torch.min(ratio * advantages, clipped * advantages).mean()
         else:
