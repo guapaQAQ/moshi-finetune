@@ -749,13 +749,18 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
         # to "cuda" breaks both).
         sd = torch.load(cli.resume_state, map_location="cpu", weights_only=False)
         optimizer.load_state_dict(sd["optimizer"])
-        # foreach/fused AdamW requires state tensors on the params' cuda device
-        # (the 'step' tensor may stay on CPU — leave it).
-        dev = torch.device("cuda", torch.cuda.current_device())
-        for st in optimizer.state.values():
-            for kk, vv in st.items():
-                if kk != "step" and torch.is_tensor(vv):
-                    st[kk] = vv.to(dev)
+        # foreach AdamW groups (param, grad, exp_avg, exp_avg_sq) by device+dtype.
+        # Mixed precision steps params in optim_dtype (fp32, via p._mp_param), so
+        # move the loaded moments to each param's device AND optim_dtype (the saved
+        # dtype/device may differ); leave the 'step' tensor as-is.
+        for group in optimizer.param_groups:
+            for p in group["params"]:
+                st = optimizer.state.get(p)
+                if not st:
+                    continue
+                for kk in ("exp_avg", "exp_avg_sq"):
+                    if kk in st and torch.is_tensor(st[kk]):
+                        st[kk] = st[kk].to(device=p.device, dtype=optim_dtype)
         scheduler.load_state_dict(sd["scheduler"])
         state.step = int(sd["step"])
         try:
