@@ -149,7 +149,7 @@ def parse_cli() -> argparse.Namespace:
     parser.add_argument("--judge_base_url", type=str, default="http://127.0.0.1:8002/v1")
     parser.add_argument("--judge_api_key", type=str, default="dummy")
     parser.add_argument("--judge_prompt_file", type=str, default=None)
-    parser.add_argument("--judge_max_tokens", type=int, default=2048)
+    parser.add_argument("--judge_max_tokens", type=int, default=1024)
     parser.add_argument("--judge_max_workers", type=int, default=16)
     parser.add_argument("--reward_key", type=str, default="applicable_avg")
     parser.add_argument("--repo_root", type=str, default=None,
