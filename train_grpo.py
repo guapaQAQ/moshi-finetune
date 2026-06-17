@@ -155,6 +155,12 @@ def parse_cli() -> argparse.Namespace:
     parser.add_argument("--repo_root", type=str, default=None,
                         help="Repo root for importing gametime generation + "
                         "reward helpers (online).")
+    parser.add_argument("--resume_state", type=str, default=None,
+                        help="Path to a train_state.pt (optimizer+scheduler+step+"
+                        "rng+cursor) saved next to a checkpoint, for seamless "
+                        "resume (no LR re-warmup / momentum reset). Pair with "
+                        "--lora_weight = that checkpoint's lora and the same "
+                        "max_steps as the original run.")
     return parser.parse_args()
 
 
@@ -717,6 +723,30 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
     else:
         main_logger_info("GRPO with KL disabled (REINFORCE + group baseline).")
 
+    # Seamless resume: restore optimizer momentum, LR-schedule position, step
+    # counter, RNG and paging cursor (the lora weights were already loaded via
+    # lora_weight in get_fsdp_model). optimizer/scheduler/step are identical
+    # across ranks (grads are synced), so rank-0's state loads correctly on all.
+    if cli.resume_state and Path(cli.resume_state).exists():
+        sd = torch.load(cli.resume_state, map_location="cuda", weights_only=False)
+        optimizer.load_state_dict(sd["optimizer"])
+        scheduler.load_state_dict(sd["scheduler"])
+        state.step = int(sd["step"])
+        try:
+            torch.set_rng_state(sd["rng_torch"])
+            torch.cuda.set_rng_state_all(sd["rng_cuda"])
+            random.setstate(sd["rng_python"])
+            np.random.set_state(sd["rng_numpy"])
+        except Exception as exc:  # noqa: BLE001
+            main_logger_info(f"[resume] RNG restore skipped: {exc!r}")
+        if online_state is not None and sd.get("cursor") is not None:
+            online_state["cursor"] = sd["cursor"]
+            online_state["since_refresh"] = sd.get("since_refresh", 0)
+        main_logger_info(
+            f"[resume] restored optimizer/scheduler/step={state.step} from "
+            f"{cli.resume_state}"
+        )
+
     while state.step < args.max_steps:
         state.start_step()
         is_last_step = state.step == args.max_steps
@@ -939,6 +969,30 @@ def _train(args: TrainArgs, cli: argparse.Namespace, exit_stack: ExitStack) -> N
                 save_only_lora=not args.full_finetuning and args.save_adapters,
                 dtype=param_dtype,
             )
+            # Save the full training state next to the lora so the run can resume
+            # seamlessly (optimizer momentum, LR schedule, step, RNG, cursor).
+            if get_rank() == 0:
+                ckpt_dir = (
+                    Path(args.run_dir) / "checkpoints"
+                    / f"checkpoint_{state.step:06d}" / "consolidated"
+                )
+                if ckpt_dir.exists():
+                    torch.save(
+                        {
+                            "step": state.step,
+                            "optimizer": optimizer.state_dict(),
+                            "scheduler": scheduler.state_dict(),
+                            "rng_torch": torch.get_rng_state(),
+                            "rng_cuda": torch.cuda.get_rng_state_all(),
+                            "rng_python": random.getstate(),
+                            "rng_numpy": np.random.get_state(),
+                            "cursor": online_state["cursor"] if online_state else None,
+                            "since_refresh": (
+                                online_state["since_refresh"] if online_state else None
+                            ),
+                        },
+                        ckpt_dir / "train_state.pt",
+                    )
 
     main_logger_info("done!")
 

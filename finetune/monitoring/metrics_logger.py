@@ -149,13 +149,17 @@ class MetricsLogger:
                 os.environ["WANDB_MODE"] = "offline"
             if wandb.run is None:
                 logger.info("initializing wandb")
+                # Honor WANDB_RUN_ID / WANDB_RESUME from the env so a resumed run
+                # continues the SAME wandb run (the pipeline sets a stable id per
+                # OUT_ROOT). Falls back to a fresh run when they're unset.
                 wandb.init(
                     config=config,
                     dir=dst_dir,
                     project=wandb_args.project,
                     job_type="training",
                     name=wandb_args.run_name or dst_dir.name,
-                    resume=False,
+                    id=os.environ.get("WANDB_RUN_ID") or None,
+                    resume=os.environ.get("WANDB_RESUME") or None,
                 )
 
             self.wandb_log = wandb.log
